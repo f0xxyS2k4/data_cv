@@ -9,12 +9,16 @@ from typing import List, Dict, Union
 import pandas as pd
 import re
 
-# --- Import các hàm xử lý dữ liệu (TRANSFORM) ---
-# Đảm bảo các hàm Transform được import đầy đủ
+# --- Import các hàm xử lý dữ liệu (TRANSFORM & CONFIG) ---
 try:
-    from data_pipeline import process_salary, extract_location_pairs, standardize_title
-except ImportError:
+    # IMPORT DB_CONFIG và cac ham o data_pipeline
+    from data_pipeline import process_salary, extract_location_pairs, standardize_title, DB_CONFIG
+except ImportError as e:
+    print(f"Lỗi: Không thể import từ data_pipeline.py. Kiểm tra file và lỗi: {e}")
     # Fallback nếu data_pipeline.py không tìm thấy hoặc bị lỗi
+    DB_CONFIG = {}  # Sẽ gây lỗi ở bước sau nếu DB_CONFIG không hợp lệ
+
+
     def process_salary(s):
         return np.nan, np.nan, np.nan, 'Unknown_Unit'
 
@@ -26,52 +30,28 @@ except ImportError:
     def standardize_title(t):
         return None
 
-# Cấu hình Database MySQL (Giữ nguyên)
-DB_CONFIG = {
-    'user': 'root',
-    'password': '123456',
-    'host': 'localhost',
-    'database': 'data_pipeline_db'
-}
-
 TOPCV_BASE_URL = "https://www.topcv.vn"
-# URL mục tiêu
 TARGET_URL = "https://www.topcv.vn/tim-viec-lam-moi-nhat"
-# Thiết lập giới hạn crawl tối đa
 MAX_PAGES = 100
 
 
-# --- HÀM KIỂM TRA LỌC (GIỮ NGUYÊN) ---
+# --- HÀM KIỂM TRA LỌC ---
 def is_recently_posted(time_raw: str) -> bool:
     """Kiểm tra xem tin tuyển dụng có phải là 'Đăng hôm nay' hoặc 'Đăng n ngày trước' không."""
-
-    if not time_raw:
-        return False
-
+    if not time_raw: return False
     cleaned_raw = time_raw.lower().replace(" ", "")
-
-    if "đănghômnay" == cleaned_raw:
-        return True
-
-    if re.match(r'đăng\d+ngàytrước', cleaned_raw):
-        return True
-
+    if "đănghômnay" == cleaned_raw: return True
+    if re.match(r'đăng\d+ngàytrước', cleaned_raw): return True
     return False
 
 
-# --- 1. CRAWLING LOGIC SỬ DỤNG REQUESTS/BEAUTIFULSOUP (EXTRACT & PARTIAL TRANSFORM) ---
+# --- 1. CRAWLING LOGIC (EXTRACT & PARTIAL TRANSFORM) ---
 
 def crawl_topcv_job_listings_html() -> List[dict]:
-    """
-    Crawl dữ liệu từ TopCV, chỉ lấy các tin có nhãn 'Đăng hôm nay' hoặc 'Đăng n ngày trước'.
-    Bắt đầu từ trang 1 cho quy trình tự động hóa hàng ngày.
-    """
+    """Crawl dữ liệu từ TopCV, chỉ lấy các tin mới nhất."""
     all_jobs = []
-    # !!! ĐIỀU CHỈNH: Bắt đầu lại từ trang 1 cho quy trình tự động hóa
     page = 1
-
     query_params = "sort=new&type_keyword=1&sba=1"
-
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -85,28 +65,24 @@ def crawl_topcv_job_listings_html() -> List[dict]:
         current_url = f"{TARGET_URL}?{query_params}&page={page}"
         print(f"\n--- Đang gửi GET Request cho Trang {page} tại URL: {current_url} ---")
 
+        # ... (Phần logic Retry/Backoff giữ nguyên) ...
         MAX_RETRIES = 3
         retry_count = 0
         response = None
-
-        # --- LOGIC TÁI THỬ NGHIỆM (RETRY/BACKOFF) ---
         while retry_count < MAX_RETRIES:
             try:
                 response = requests.get(current_url, headers=headers, timeout=20)
                 response.raise_for_status()
                 break
-
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 429:
                     retry_count += 1
                     wait_time = 30 * retry_count
-                    print(
-                        f"⚠️ Lỗi 429 (Too Many Requests). Đang thử lại lần {retry_count}/{MAX_RETRIES} sau {wait_time} giây.")
+                    print(f"⚠️ Lỗi 429. Thử lại lần {retry_count}/{MAX_RETRIES} sau {wait_time} giây.")
                     time.sleep(wait_time)
                 else:
                     print(f"❌ Lỗi Requests khi truy cập trang {page}: {e}. Dừng crawl.")
                     return all_jobs
-
             except requests.exceptions.RequestException as e:
                 print(f"❌ Lỗi kết nối khi truy cập trang {page}: {e}. Dừng crawl.")
                 return all_jobs
@@ -128,8 +104,8 @@ def crawl_topcv_job_listings_html() -> List[dict]:
         for item in job_items:
             try:
                 time_raw = ''
+                # ... (Logic trích xuất time_raw giữ nguyên) ...
                 time_label = item.select_one('label.label-update')
-
                 if time_label:
                     if 'data-original-title' in time_label.attrs:
                         time_raw = time_label['data-original-title'].strip()
@@ -139,7 +115,7 @@ def crawl_topcv_job_listings_html() -> List[dict]:
                 if is_recently_posted(time_raw):
                     job_title = 'N/A'
                     link_description = 'N/A'
-
+                    # ... (Logic trích xuất job_title, link, company, salary_raw, address giữ nguyên) ...
                     img_tag = item.select_one('div.avatar a img')
                     if img_tag and 'title' in img_tag.attrs:
                         job_title = img_tag['title']
@@ -171,8 +147,6 @@ def crawl_topcv_job_listings_html() -> List[dict]:
                     # 3. ÁP DỤNG CÁC HÀM TỪ data_pipeline (TRANSFORM)
                     avg, min_s, max_s, unit = process_salary(salary_raw)
                     locations = extract_location_pairs(address)
-
-                    # !!! THAY ĐỔI: GỌI standardize_title
                     standardized_title_val = standardize_title(job_title)
 
                     # 4. Lưu dữ liệu
@@ -186,12 +160,12 @@ def crawl_topcv_job_listings_html() -> List[dict]:
                             'salary_unit': unit,
                             'city': city,
                             'district': district,
-                            'standardized_job_title': standardized_title_val,  # <<< CỘT MỚI ĐÃ CHUẨN HÓA
+                            'standardized_job_title': standardized_title_val,
                             'link_description': link_description
                         })
                     jobs_added_on_page += 1
-
                 else:
+                    # ... (Logic bỏ qua tin cũ giữ nguyên) ...
                     display_time = time_raw if time_raw else "Không trích xuất được"
                     print(f"Bỏ qua tin tuyển dụng KHÔNG phải tin mới (Thời gian: {display_time}). Tiếp tục tìm kiếm.")
                     continue
@@ -204,7 +178,6 @@ def crawl_topcv_job_listings_html() -> List[dict]:
             f"Hoàn thành trích xuất Trang {page}. Đã thêm {jobs_added_on_page} công việc. Tổng số BẢN GHI (đã nhân bản): {len(all_jobs)}.")
 
         page += 1
-
         sleep_time = random.uniform(5, 12)
         print(f"Tạm dừng {sleep_time:.2f} giây trước khi chuyển sang trang tiếp theo.")
         time.sleep(sleep_time)
@@ -215,17 +188,20 @@ def crawl_topcv_job_listings_html() -> List[dict]:
 # --- 2. DATABASE LOGIC (LOAD) ---
 
 def save_to_mysql(job_data: List[dict]):
-    """Lưu dữ liệu công việc đã crawl vào MySQL. Sử dụng INSERT để tận dụng UNIQUE key."""
+    """Lưu dữ liệu công việc đã crawl vào MySQL."""
     if not job_data:
         print("Không có dữ liệu để lưu.")
         return
 
     conn = None
+    if not DB_CONFIG:
+        print("❌ Lỗi: DB_CONFIG chưa được cấu hình hoặc import thất bại.")
+        return
+
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # !!! THAY ĐỔI: Thêm standardized_job_title vào query
         insert_query = """
         INSERT INTO job_listings_clean (
             job_title, standardized_job_title, company, salary, min_salary, max_salary, 
@@ -237,6 +213,7 @@ def save_to_mysql(job_data: List[dict]):
 
         records_to_insert = []
         for job in job_data:
+            # Xử lý numpy.nan sang None cho MySQL
             salary_val = None if isinstance(job['salary'], float) and np.isnan(job['salary']) else job['salary']
             min_val = None if isinstance(job['min_salary'], float) and np.isnan(job['min_salary']) else job[
                 'min_salary']
@@ -252,7 +229,7 @@ def save_to_mysql(job_data: List[dict]):
 
             records_to_insert.append((
                 job_title_val,
-                standardized_title_val,  # <<< CỘT MỚI
+                standardized_title_val,
                 company_val,
                 salary_val,
                 min_val,
@@ -263,7 +240,7 @@ def save_to_mysql(job_data: List[dict]):
                 job['link_description']
             ))
 
-        # SỬ DỤNG INSERT IGNORE ĐỂ BỎ QUA CÁC BẢN GHI TRÙNG LẶP (Dựa trên UNIQUE(link_description(255)))
+        # SỬ DỤNG INSERT IGNORE ĐỂ BỎ QUA CÁC BẢN GHI TRÙNG LẶP
         insert_ignore_query = insert_query.replace("INSERT INTO", "INSERT IGNORE INTO")
 
         cursor.executemany(insert_ignore_query, records_to_insert)
@@ -293,7 +270,6 @@ if __name__ == "__main__":
         try:
             df = pd.DataFrame(new_jobs)
             unique_links_count = df['link_description'].nunique()
-
             print("--- BÁO CÁO SỐ LƯỢNG DATA ---")
             print(f"Tổng số TIN TUYỂN DỤNG DUY NHẤT (trước khi Load): {unique_links_count}")
             print(f"Tổng số BẢN GHI (đã nhân bản theo địa điểm): {len(new_jobs)}")

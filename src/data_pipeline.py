@@ -1,21 +1,15 @@
 import pandas as pd
 import re
 import numpy as np
-from sqlalchemy import create_engine
-import os
-# Cấu hình Extract
+from typing import Tuple, List, Optional
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE_PATH = os.path.join(BASE_DIR, '..', 'data', 'data.csv') # <<< ĐÃ SỬA LỖI ĐƯỜNG DẪN
-
-# Cấu hình
-DB_USER = "root"
-DB_PASSWORD = "123456"
-DB_HOST = "localhost"
-DB_PORT = "3306"
-DB_NAME = "data_pipeline_db"
-TABLE_NAME = 'job_listings_clean'
-
+# --- CẤU HÌNH DATABASE DÙNG CHUNG ---
+DB_CONFIG = {
+    'user': 'root',
+    'password': '123456',
+    'host': 'localhost',
+    'database': 'data_pipeline_db'
+}
 
 
 # 1. TRANSFORM
@@ -23,7 +17,7 @@ TABLE_NAME = 'job_listings_clean'
 
 def process_salary(salary):
     """
-    Chuẩn hóa cột salary.
+    Chuẩn hóa cột salary (Mức lương tính bằng Triệu VND hoặc USD).
     """
     avg_s, min_s, max_s, unit = np.nan, np.nan, np.nan, np.nan
 
@@ -66,9 +60,11 @@ def process_salary(salary):
         raw_unit = match_threshold.group(3)
         val, unit = convert_value_and_set_unit(num, raw_unit)
         if 'trên' in keyword or 'từ' in keyword or 'above' in keyword:
-            min_s = val; avg_s = val
+            min_s = val;
+            avg_s = val
         elif 'tới' in keyword or 'up to' in keyword:
-            max_s = val; avg_s = val
+            max_s = val;
+            avg_s = val
         return avg_s, min_s, max_s, unit
 
     # 4. Fallback cho giá trị đơn
@@ -85,29 +81,34 @@ def process_salary(salary):
 
 def standardize_title(job_title):
     """ Gom nhóm tiêu đề công việc. """
-    if pd.isna(job_title): return 'Unknown'
+    if pd.isna(job_title) or job_title is None: return 'Unknown'
     title = job_title.lower()
     if 'data analyst' in title or 'business analyst' in title or 'phân tích dữ liệu' in title or 'ba' == title.strip():
         return 'Data/Business Analyst'
+    elif 'data engineer' in title or 'kỹ sư dữ liệu' in title or 'etl' in title or 'system engineer' in title:
+        return 'Data/System Engineer'  # <<< CẦN THIẾT CHO BÁO CÁO DISCORD
     elif 'software engineer' in title or 'developer' in title or 'lập trình viên' in title or 'dev' in title or 'programmer' in title or 'dotnet' in title:
         return 'Software Developer'
-    elif 'data engineer' in title or 'kỹ sư dữ liệu' in title or 'etl' in title or 'system engineer' in title:
-        return 'Data/System Engineer'
     elif 'tester' in title or 'qa' in title or 'qc' in title:
         return 'QA/Tester'
     elif 'manager' in title or 'pm' in title or 'project lead' in title:
         return 'Management/Lead'
+    elif 'kinh doanh' in title or 'sales' in title or 'bán hàng' in title:
+        return 'Business/Sales'
+    elif 'kế toán' in title or 'accounting' in title or 'kiểm toán' in title:
+        return 'Accounting/Auditing'
     else:
         return 'Other IT Role'
 
 
-def extract_location_pairs(address):
+def extract_location_pairs(address) -> List[Tuple[Optional[str], Optional[str]]]:
     """ Trích xuất TẤT CẢ các cặp (City, District). """
-    if pd.isna(address) or not isinstance(address, str): return [('Unknown', None)]
+    # ... (Logic giữ nguyên)
+    if pd.isna(address) or not isinstance(address, str) or address.lower() == 'n/a':
+        return [('Unknown', None)]
 
     address_lower = address.lower()
 
-    # Xử lý các trường hợp đặc biệt
     if any(keyword in address_lower for keyword in ['toàn quốc', 'vietnam', 'viet nam']):
         return [('Toàn Quốc', None)]
     if any(keyword in address_lower for keyword in ['nước ngoài', 'oversea', 'global']):
@@ -115,114 +116,25 @@ def extract_location_pairs(address):
     if any(keyword in address_lower for keyword in ['nhiều địa điểm', 'multi-location']):
         return [('Multi-location', None)]
 
-    # Tách chuỗi theo dấu ':'
-    parts = [p.strip() for p in address.split(':') if p.strip()]
+    parts = [p.strip() for p in re.split(r'[,;-]', address) if p.strip()]
     location_pairs = []
 
-    # Duyệt qua các phần tử, giả định cứ 2 phần tử là 1 cặp City:District
-    i = 0
-    while i < len(parts):
-        city = parts[i].title()
-        district = parts[i + 1] if (i + 1 < len(parts)) else None
-        location_pairs.append((city, district))
-        i += 2
+    for part in parts:
+        if ':' in part:
+            city, district = [p.strip().title() for p in part.split(':', 1)]
+            location_pairs.append((city, district if district else None))
+        else:
+            if 'hà nội' in part.lower():
+                location_pairs.append(('Hà Nội', part.replace('Hà Nội', '').strip().title() if len(part) > 6 else None))
+            elif 'tp.hcm' in part.lower() or 'hồ chí minh' in part.lower():
+                location_pairs.append(('TP.HCM',
+                                       part.replace('TP.HCM', '').replace('Hồ Chí Minh', '').strip().title() if len(
+                                           part) > 7 else None))
+            else:
+                location_pairs.append((part.title(), None))
 
-    return location_pairs if location_pairs else [('Unknown', None)]
+    valid_pairs = [p for p in location_pairs if p[0] != 'Unknown']
 
+    return valid_pairs if valid_pairs else [('Unknown', None)]
 
-
-# 2. ETL
-
-
-def run_etl_pipeline():
-    """ Thực hiện toàn bộ quá trình Extract, Transform, Load. """
-
-    df = None
-
-
-# EXTRACT (E)
-
-    print(f"[{'=' * 5} EXTRACT {'=' * 5}] Bắt đầu đọc dữ liệu...")
-    try:
-        df = pd.read_csv(CSV_FILE_PATH, encoding='utf-8')
-        print(f"[E] Đã đọc thành công {len(df)} dòng dữ liệu từ {CSV_FILE_PATH}")
-    except FileNotFoundError:
-        print(f"[ERROR - E] KHÔNG TÌM THẤY file CSV: {CSV_FILE_PATH}. Dừng pipeline.")
-        return
-    except Exception as e:
-        print(f"[ERROR - E] Lỗi đọc CSV: {e}. Dừng pipeline.")
-        return
-
-
-# TRANSFORM (T)
-
-    print(f"\n[{'=' * 5} TRANSFORM {'=' * 5}] Bắt đầu làm sạch và chuẩn hóa...")
-    df_clean = pd.DataFrame()
-    try:
-        # T1: Xử lý cột salary
-        salary_processed = df['salary'].apply(lambda x: process_salary(x)).tolist()
-        df = df.drop(columns=['salary'])
-
-        df['salary_unit'] = [res[3] for res in salary_processed]
-        df['salary'] = [res[0] for res in salary_processed]
-        df['min_salary'] = [res[1] for res in salary_processed]
-        df['max_salary'] = [res[2] for res in salary_processed]
-
-        df['salary_unit'] = df['salary_unit'].fillna('Unknown').astype(str)
-
-        # T2: Xử lý cột job_title
-        df['standardized_job_title'] = df['job_title'].apply(standardize_title)
-
-        # T3: Trích xuất các cặp (city, district)
-        df['location_pairs'] = df['address'].apply(extract_location_pairs)
-
-        # T4: Tách dòng dữ liệu (explode)
-        df_exploded = df.explode('location_pairs').reset_index(drop=True)
-        df_exploded[['city', 'district']] = pd.DataFrame(df_exploded['location_pairs'].tolist(),
-                                                         index=df_exploded.index)
-
-        # T5: Chọn các cột cuối cùng (ĐÃ THÊM CỘT job_title GỐC)
-        df_clean = df_exploded[[
-            'job_title',  # <<< ĐÃ THÊM CỘT NÀY CHO PHÂN TÍCH XU HƯỚNG CÔNG NGHỆ
-            'company', 'salary', 'min_salary', 'max_salary', 'salary_unit', 'city',
-            'district', 'standardized_job_title', 'link_description'
-        ]].copy()
-
-        df_clean['city'] = df_clean['city'].astype(str)
-        df_clean['district'] = df_clean['district'].fillna('Unknown').astype(str)
-
-        print(f"[T] Hoàn tất Transform. Dữ liệu sạch có {len(df_clean)} dòng.")
-
-    except Exception as e:
-        print(f"[ERROR - T] Lỗi trong quá trình Transform dữ liệu: {e}. Dừng pipeline.")
-        return
-
-
-# LOAD (L)
-
-    print(f"\n[{'=' * 5} LOAD {'=' * 5}] Bắt đầu tải dữ liệu vào MySQL...")
-
-    DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-
-    try:
-        engine = create_engine(DATABASE_URL)
-
-        # Sử dụng 'replace' để tạo lại bảng, đảm bảo cột job_title được thêm vào schema
-        df_clean.to_sql(
-            name=TABLE_NAME,
-            con=engine,
-            if_exists='replace',
-            index=False
-        )
-        print(f"[L] Đã Tải thành công {len(df_clean)} dòng dữ liệu vào MySQL Bảng: {TABLE_NAME}")
-
-    except Exception as e:
-        print(f"Lỗi kết nối hoặc tải dữ liệu vào MySQL: {e}")
-        print("Load thất bại. Kiểm tra lại thông tin DB và thông tin đăng nhập.")
-        return
-
-    print("\n PIPELINE ETL (E, T, L) ĐÃ HOÀN THIỆN!")
-
-
-if __name__ == "__main__":
-    run_etl_pipeline()
+# Không cần hàm run_etl_pipeline và __main__ ở đây nữa
